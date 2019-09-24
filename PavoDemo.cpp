@@ -17,6 +17,8 @@
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
+#include <math.h>
+
 #include "PavoDemo.h"
 
 void PavoDemo::drawFrame() {
@@ -103,16 +105,13 @@ void PavoDemo::drawString(const char *str) {
 	}
 }
 
-void PavoDemo::processEvents()
-{
+void PavoDemo::processEvents() {
     SDL_Event event;
-
-    while( SDL_PollEvent( &event ) ) {
-		
+    while(pavoPollEvent(&event)) {
         switch( event.type ) {
 		case SDL_KEYDOWN:
-				if (event.key.repeat) continue;
-				else if( event.key.keysym.sym == SDLK_ESCAPE ){
+			if (event.key.repeat) continue;
+			else if( event.key.keysym.sym == SDLK_ESCAPE ){
 				running = false;
 				SDL_Quit();
 			} else if( event.key.keysym.sym == SDLK_F1 ){
@@ -177,8 +176,76 @@ void PavoDemo::processEvents()
     }
 }
 
-bool pavoPollEvent(SDL_Event *event) {
+int PavoDemo::pavoPollEvent(SDL_Event *event) {
+	static bool mouseButtonPressed = false; 
+	static TuioPoint pressedPoint(0, 0);
 
+	if (SDL_PollEvent(event)) {
+		if (event->type != SDL_MOUSEBUTTONDOWN && 
+			event->type != SDL_MOUSEBUTTONUP) {
+			return 1;
+		} 
+	}
+
+	int bufferSize = 8192;
+	pavo_response_scan_t* buffer = new pavo_response_scan_t[bufferSize];
+	memset(buffer, sizeof(pavo_response_scan_t)*bufferSize, 0);
+	if (lidarDriver->get_scanned_data(buffer, bufferSize)) {
+		delete[] buffer;
+		return 0;
+	}
+
+	std::vector<TuioPoint> points;
+	for (int i = 0; i < bufferSize; i++) {
+		pavo_response_scan_t item = buffer[i];
+		double radian = item.angle / 100.0 * 3.141592653 / 180;
+		double r = item.distance * 2;
+		double x = r * cos(radian) / 1000;
+		double y = r * sin(radian) / 750;
+		if (x <= 0 && x > -1 && y >= 0 && y < 1) {
+			x = -x * width;
+			y = y * height;
+			points.push_back(TuioPoint(x, y));
+		}
+	}
+
+	if (points.size() > 0) {
+		float sumX = 0, sumY = 0;
+		for (int i = 0, n = points.size(); i < n; i++) {
+			sumX += points[i].getX();
+			sumY += points[i].getY();
+		}
+		float centroidX = sumX / points.size();
+		float centroidY = sumY / points.size();
+		
+		if (centroidX - pressedPoint.getX() > 1 && 
+				centroidY - pressedPoint.getY() > 1 && 
+				mouseButtonPressed) {
+			mouseButtonPressed = false;
+			event->type = SDL_MOUSEBUTTONUP;
+			event->button.button = SDL_BUTTON_LEFT;
+			event->button.x = (int) pressedPoint.getX();
+			event->button.y = (int) pressedPoint.getY();
+		} else if (!mouseButtonPressed) {
+			pressedPoint.update(centroidX, centroidY);
+			mouseButtonPressed = true;
+			event->type = SDL_MOUSEBUTTONDOWN;
+			event->button.button = SDL_BUTTON_LEFT;
+			event->button.x = (int) pressedPoint.getX();
+			event->button.y = (int) pressedPoint.getY();
+		}
+	} else if (mouseButtonPressed) {
+		mouseButtonPressed = false;
+		event->type = SDL_MOUSEBUTTONUP;
+		event->button.button = SDL_BUTTON_LEFT;
+		event->button.x = int(pressedPoint.getX());
+		event->button.y = int(pressedPoint.getY());
+	} else {
+		delete[] buffer;
+		return 0;
+	}
+	delete[] buffer;
+	return 1;
 }
 
 void PavoDemo::mousePressed(float x, float y) {
@@ -314,7 +381,7 @@ PavoDemo::PavoDemo(TuioServer* sever)
 	initWindow();
 	SDL_SetWindowTitle(window,"PavoDemo");
 
-    lidarDriver = new pavo_driver();
+    lidarDriver = new pavo_driver("10.10.10.101", 2368, "10.10.10.100", 2368);
 }
 
 PavoDemo::~PavoDemo() {
@@ -361,7 +428,7 @@ void PavoDemo::initWindow() {
 }
 
 void PavoDemo::run() {
-	running=true;
+	running = true;
 	while (running) {
 		frameTime = TuioTime::getSessionTime();
 		tuioServer->initFrame(frameTime);
@@ -371,55 +438,18 @@ void PavoDemo::run() {
 		drawFrame();
 
 		// simulate 50Hz compensating the previous processing time
-		int delay = 20 - (TuioTime::getSessionTime().getTotalMilliseconds() - frameTime.getTotalMilliseconds());
+		int delay = 20 - (
+			TuioTime::getSessionTime().getTotalMilliseconds() - 
+			frameTime.getTotalMilliseconds());
 		if (delay>0) SDL_Delay(delay);
 	}
 }
 
-int main(int argc, char* argv[])
-{
-/*	if (( argc != 1) && ( argc != 3)) {
-        	std::cout << "usage: PavoDemo [host] [port]\n";
-        	return 0;
-	}*/
-
-#ifndef __MACOSX__
-	glutInit(&argc,argv);
-#else
-    if ((argc>1) && ((std::string(argv[1]).find("-NSDocumentRevisionsDebugMode")==0 ) || (std::string(argv[1]).find("-psn_")==0))) argc = 1;
-#endif
-
+int main(int argc, char* argv[]) {
 	TuioServer *server = NULL;
 	if( argc == 3 ) {
 		server = new TuioServer(argv[1],atoi(argv[2]));
 	} else server = new TuioServer(); // default is UDP port 3333 on localhost
-
-	// add an additional TUIO/TCP sender
-	OscSender *tcp_sender = NULL;
-	if( argc == 2 ) {
-		try { tcp_sender = new TcpSender(atoi(argv[1])); }
-		catch (std::exception e) { tcp_sender = NULL; }
-	} else if ( argc == 3 ) {
-		try { tcp_sender = new TcpSender(argv[1],atoi(argv[2])); }
-		catch (std::exception e) { tcp_sender = NULL; }
-	} else {
-		try { tcp_sender = new TcpSender(3333); }
-		catch (std::exception e) { tcp_sender = NULL; }
-	}
-	if (tcp_sender) server->addOscSender(tcp_sender);
-
-	
-	// add an additional TUIO/WEB sender
-	OscSender *web_sender = NULL;
-	try { web_sender = new WebSockSender(8080); }
-	catch (std::exception e) { web_sender = NULL; }
-	if (web_sender) server->addOscSender(web_sender);
-	
-	// add an additional TUIO/FLC sender
-	OscSender *flash_sender = NULL;
-	try { flash_sender = new FlashSender(); }
-	catch (std::exception e) { flash_sender = NULL; }
-	if (flash_sender) server->addOscSender(flash_sender);
 
 	PavoDemo *app = new PavoDemo(server);
 	app->run();

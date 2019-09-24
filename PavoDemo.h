@@ -51,6 +51,7 @@ private:
 	TuioTime frameTime;
 
     pavo_driver *lidarDriver;
+	int pavoPollEvent(SDL_Event* event);
 	
 	void mousePressed(float x, float y);
 	void mouseReleased(float x, float y);
